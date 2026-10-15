@@ -1,0 +1,127 @@
+--------------------------------------------------------------------
+--  CNC::Integration
+--
+--  Integracao de todo o sistema. E o componente RAIZ do modelo:
+--  e este que deve ser instanciado no OSATE.
+--  (Antes se chamava CNC::System; "system" e palavra reservada do
+--  AADL e o OSATE nao aceita como nome de package.)
+--
+--     [axis_x]  [axis_y]  [axis_z]  [spindle]    <- atuadores (system)
+--     motor+P   motor+P   motor+P   motor+P+T    P = sensor potencia
+--         |         |         |         |        T = sensor temperatura
+--         +---------+-- fieldbus -------+
+--                        |
+--               [cpu: CNC_Controller]  <- ctrl (3 threads)
+--                        |
+--                   eth (Ethernet)
+--                        |
+--                  [esp: ESP32]        <- gw (1 thread)
+--                        |
+--                (nuvem: fora do escopo)
+--------------------------------------------------------------------
+
+package CNC::Integration
+public
+with CNC::Hardware;
+with CNC::Software;
+
+  system CNC_Machine
+  end CNC_Machine;
+
+  system implementation CNC_Machine.impl
+  subcomponents
+
+    --  Plataforma de execucao
+    cpu      : processor CNC::Hardware::CNC_Controller.impl;
+    esp      : processor CNC::Hardware::ESP32.impl;
+    fieldbus : bus       CNC::Hardware::Fieldbus;
+    eth      : bus       CNC::Hardware::Ethernet;
+
+    --  Atuadores da maquina (motor + sensores)
+    axis_x   : system CNC::Hardware::Axis_Actuator.impl;
+    axis_y   : system CNC::Hardware::Axis_Actuator.impl;
+    axis_z   : system CNC::Hardware::Axis_Actuator.impl;
+    spindle  : system CNC::Hardware::Spindle_Actuator.impl;
+
+    --  Software
+    ctrl     : process CNC::Software::CNC_Control.impl;
+    gw       : process CNC::Software::Gateway.impl;
+
+  connections
+
+    --  Controladora <-> atuadores
+    n01 : port ctrl.axis_x_cmd -> axis_x.Command;
+    n02 : port ctrl.axis_y_cmd -> axis_y.Command;
+    n03 : port ctrl.axis_z_cmd -> axis_z.Command;
+    n04 : port axis_x.Position -> ctrl.axis_x_pos;
+    n05 : port axis_y.Position -> ctrl.axis_y_pos;
+    n06 : port axis_z.Position -> ctrl.axis_z_pos;
+    n07 : port ctrl.spindle_cmd -> spindle.Speed_Command;
+    n08 : port spindle.Speed_Feedback -> ctrl.spindle_fb;
+
+    --  Sensores -> controladora
+    n10 : port axis_x.Power -> ctrl.axis_x_power;
+    n11 : port axis_y.Power -> ctrl.axis_y_power;
+    n12 : port axis_z.Power -> ctrl.axis_z_power;
+    n13 : port spindle.Power -> ctrl.spindle_power;
+    n14 : port spindle.Temperature -> ctrl.spindle_temp;
+
+    --  Controladora -> gateway ESP32 (telemetria, por Ethernet)
+    n09 : port ctrl.telemetry -> gw.telemetry_in;
+
+    --  Acesso aos barramentos
+    p01 : bus access fieldbus -> axis_x.FB;
+    p02 : bus access fieldbus -> axis_y.FB;
+    p03 : bus access fieldbus -> axis_z.FB;
+    p04 : bus access fieldbus -> spindle.FB;
+    p05 : bus access fieldbus -> cpu.FB;
+    p06 : bus access eth -> cpu.ETH;
+    p07 : bus access eth -> esp.ETH;
+
+  flows
+
+    --  Fluxos fim a fim para a analise de latencia (requisitos CF1a-c
+    --  e CT1). Eixo X como representante: Y e Z sao identicos.
+    e2e_pos_x     : end to end flow axis_x.f_pos -> n04 -> ctrl.f_pos_x_in;
+    e2e_power_x   : end to end flow axis_x.f_power -> n10 -> ctrl.f_power_x_in;
+    e2e_temp      : end to end flow spindle.f_temp -> n14 -> ctrl.f_temp_in;
+    e2e_telemetry : end to end flow ctrl.f_telem_out -> n09 -> gw.f_rx;
+
+  properties
+
+    --  Alocacao do software nos processadores
+    Actual_Processor_Binding => (reference (cpu)) applies to ctrl;
+    Actual_Processor_Binding => (reference (esp)) applies to gw;
+
+    --  Alocacao das conexoes nos barramentos
+    Actual_Connection_Binding => (reference (fieldbus)) applies to n01;
+    Actual_Connection_Binding => (reference (fieldbus)) applies to n02;
+    Actual_Connection_Binding => (reference (fieldbus)) applies to n03;
+    Actual_Connection_Binding => (reference (fieldbus)) applies to n04;
+    Actual_Connection_Binding => (reference (fieldbus)) applies to n05;
+    Actual_Connection_Binding => (reference (fieldbus)) applies to n06;
+    Actual_Connection_Binding => (reference (fieldbus)) applies to n07;
+    Actual_Connection_Binding => (reference (fieldbus)) applies to n08;
+    Actual_Connection_Binding => (reference (fieldbus)) applies to n10;
+    Actual_Connection_Binding => (reference (fieldbus)) applies to n11;
+    Actual_Connection_Binding => (reference (fieldbus)) applies to n12;
+    Actual_Connection_Binding => (reference (fieldbus)) applies to n13;
+    Actual_Connection_Binding => (reference (fieldbus)) applies to n14;
+
+    --  A telemetria e o unico trafego que sai da maquina, e sai
+    --  apenas por Ethernet.
+    Actual_Connection_Binding => (reference (eth)) applies to n09;
+
+    --  Limites de latencia fim a fim (valores tipicos de CNC).
+    --  Posicao: malha critica, 1 ciclo de controle.
+    --  Potencia: monitoramento de carga do motor.
+    --  Temperatura: constante termica de segundos.
+    --  Telemetria: nao critica, 2 ciclos de envio.
+    Latency => 0 ms .. 1 ms   applies to e2e_pos_x;
+    Latency => 0 ms .. 10 ms  applies to e2e_power_x;
+    Latency => 0 ms .. 500 ms applies to e2e_temp;
+    Latency => 0 ms .. 200 ms applies to e2e_telemetry;
+
+  end CNC_Machine.impl;
+
+end CNC::Integration;

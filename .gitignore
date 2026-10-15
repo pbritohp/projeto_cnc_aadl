@@ -1,0 +1,9 @@
+# OSATE/AADL artefatos gerados
+.aadlbin-gen/
+instances/
+
+# Sistema
+.DS_Store
+
+# Arquivo de projeto Eclipse solto (a pasta aadl NAO e um projeto separado)
+aadl/.project

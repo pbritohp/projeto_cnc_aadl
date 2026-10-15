@@ -1,0 +1,60 @@
+// ------------------------------------------------------------------
+//  Requisitos CNC -> ESP32 (telemetria)
+//
+//  Parte NAO CRITICA do sistema: o envio de dados de processo ao
+//  ESP32 serve apenas para registro/monitoramento. Uma falha aqui
+//  nao afeta a usinagem, por isso os limites sao folgados.
+//  Deriva de R1 (parte de rede) e R6 do relatorio (secao 6).
+//
+//  A malha critica CNC <-> atuadores esta em cnc_campo.reqspec.
+// ------------------------------------------------------------------
+
+// Nivel de sistema: enlace Ethernet e gateway
+//
+// O ReqSpec permite UM UNICO conjunto "system requirements" por
+// componente, e o de CNC_Machine.impl esta em cnc_campo.reqspec. Por
+// isso estes requisitos sao "global requirements" (nao presos a um
+// componente) e sao aplicados ao modelo pelos "include ... for <elemento>"
+// do conjunto CNC_Campo_Sistema.
+global requirements CNC_Telemetria_Sistema : "Requisitos de telemetria - enlace e gateway"
+[
+	description "Requisitos de telemetria entre o comando numerico e o gateway ESP32. Nao criticos."
+	see document Relatorio_AADL_CNC_Grupo8_1.docx
+
+	requirement CT1 : "Latencia CN -> ESP32" for flow [
+		val MaxLatency = 200 ms
+		compute cn_to_esp_latency : AADL_Project::Time
+		description "Um registro de telemetria deve chegar ao ESP32 em no maximo " MaxLatency " apos ser montado pelo comando numerico."
+		value predicate cn_to_esp_latency <= MaxLatency
+		rationale "Parte de rede do R1 do relatorio, relaxada: a telemetria nao e critica. 200 ms = dois ciclos de telemetria (100 ms). Estimativa: resposta da telem 13,8 + Ethernet 2 + espera 100 + rx 10 = ~126 ms."
+		issues "O R1 original pedia 10 ms fim a fim (sensor -> ESP32). Limite relaxado por decisao do grupo (30/09/2026)."
+	]
+
+	requirement CT2 : "Enlace externo apenas por Ethernet" for bus [
+		description "Toda comunicacao da maquina com o exterior deve passar pelo barramento " this "."
+		informal predicate "A unica conexao que sai da maquina (n09) esta vinculada ao barramento Ethernet."
+		rationale "Informacao da Technodrill: a maquina se comunica apenas por Ethernet, com IP fixo."
+	]
+
+	requirement CT3 : "Registro das amostras no ESP32" for process [
+		description "O processo " this " deve registrar a potencia dos 4 atuadores e a temperatura do spindle."
+		informal predicate "Cada registro de telemetria recebido contem as 4 potencias e a temperatura."
+		rationale "R6 do relatorio. Perdas ocasionais sao toleradas, por ser telemetria. O tipo Telemetry_Record.impl contem os campos power_x, power_y, power_z, power_spindle e temperature, e e o tipo das portas telemetry (CNC) e telemetry_in (ESP32)."
+		issues "O R6 original pedia 'sem perda de amostras'. Relaxado por ser telemetria; ver CT4 para a condicao de periodo."
+	]
+]
+
+// Nivel de software: thread do gateway
+system requirements CNC_Telemetria_Gateway : "Requisitos de telemetria - thread do gateway"
+	for CNC::Software::Gateway.impl
+[
+	description "Requisito temporal da thread que recebe a telemetria no ESP32."
+
+	requirement CT4 : "Taxa de leitura do gateway" for rx [
+		val TxPeriod = 100 ms
+		description "A thread " this " deve ler a telemetria com periodo menor ou igual ao do envio (" TxPeriod ")."
+		value predicate #Timing_Properties::Period <= TxPeriod
+		rationale "Se o gateway ler mais devagar do que a controladora envia, registros sao sobrescritos na data port."
+		see requirement CNC_Telemetria_Sistema.CT3
+	]
+]

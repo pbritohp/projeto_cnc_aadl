@@ -1,0 +1,235 @@
+--------------------------------------------------------------------
+--  CNC::Software
+--------------------------------------------------------------------
+
+package CNC::Software
+public
+with CNC::Types;
+with Cheddar_Properties;
+
+  ------------------------------------------------------------------
+  --  THREADS DA CONTROLADORA
+  ------------------------------------------------------------------
+
+  --  Malha de controle de movimento dos tres eixos. Le a posicao dos
+  --  encoders e gera o comando para os servo drives. E a tarefa mais
+  --  rapida e mais critica do sistema. Tambem monitora a potencia dos
+  --  eixos para detectar sobrecarga (requisito CF1b).
+  --
+  --  Periodo de 1 ms (requisito CF3), sincronizado com o ciclo do
+  --  fieldbus. Os 8 ms informados pela Technodrill sao o ciclo de
+  --  atualizacao CNC -> IHM, que nao e modelado.
+  thread Motion_Control
+  features
+    pos_x   : in  data port CNC::Types::Axis_Position;
+    pos_y   : in  data port CNC::Types::Axis_Position;
+    pos_z   : in  data port CNC::Types::Axis_Position;
+    power_x : in  data port CNC::Types::Power_Reading;
+    power_y : in  data port CNC::Types::Power_Reading;
+    power_z : in  data port CNC::Types::Power_Reading;
+    cmd_x   : out data port CNC::Types::Axis_Command;
+    cmd_y   : out data port CNC::Types::Axis_Command;
+    cmd_z   : out data port CNC::Types::Axis_Command;
+    state   : requires data access CNC::Types::Machine_State.impl;
+  flows
+    f_pos_x_in   : flow sink pos_x;
+    f_power_x_in : flow sink power_x;
+  end Motion_Control;
+
+  thread implementation Motion_Control.impl
+  properties
+    Dispatch_Protocol      => Periodic;
+    Period                 => 1 ms;
+    Deadline               => 1 ms;
+    Compute_Execution_Time => 100 us .. 200 us;
+    Priority               => 20;
+  end Motion_Control.impl;
+
+  --  Controle de rotacao do eixo-arvore. Tambem monitora a
+  --  temperatura do spindle: acima de 70 graus C gera alarme e reduz
+  --  a rotacao pela metade (requisito CF5 / R5).
+  thread Spindle_Control
+  features
+    feedback    : in  data port CNC::Types::Spindle_Speed;
+    temperature : in  data port CNC::Types::Temperature_Reading;
+    command     : out data port CNC::Types::Spindle_Speed;
+    alarm       : out event port;
+    state       : requires data access CNC::Types::Machine_State.impl;
+  flows
+    f_temp_in : flow sink temperature;
+  end Spindle_Control;
+
+  thread implementation Spindle_Control.impl
+  properties
+    Dispatch_Protocol      => Periodic;
+    Period                 => 20 ms;
+    Deadline               => 20 ms;
+    Compute_Execution_Time => 2 ms .. 3 ms;
+    Priority               => 15;
+  annex behavior_specification {**
+    states
+      s : initial complete final state;
+    transitions
+      t : s -[on dispatch]-> s {
+        if (temperature > 70.0)
+          command := feedback / 2;
+          alarm!
+        else
+          command := feedback
+        end if
+      };
+  **};
+  end Spindle_Control.impl;
+
+  --  Monta o registro de telemetria a partir do estado da maquina e
+  --  das leituras dos sensores (potencia dos 4 atuadores e
+  --  temperatura do spindle) e o envia pela rede Ethernet ao gateway
+  --  ESP32 (requisito R6).
+  thread Telemetry_Tx
+  features
+    power_x       : in  data port CNC::Types::Power_Reading;
+    power_y       : in  data port CNC::Types::Power_Reading;
+    power_z       : in  data port CNC::Types::Power_Reading;
+    power_spindle : in  data port CNC::Types::Power_Reading;
+    temperature   : in  data port CNC::Types::Temperature_Reading;
+    frame         : out data port CNC::Types::Telemetry_Record.impl;
+    state         : requires data access CNC::Types::Machine_State.impl;
+  flows
+    f_tx : flow source frame;
+  end Telemetry_Tx;
+
+  thread implementation Telemetry_Tx.impl
+  properties
+    Dispatch_Protocol      => Periodic;
+    Period                 => 100 ms;
+    Deadline               => 100 ms;
+    Compute_Execution_Time => 5 ms .. 8 ms;
+    Priority               => 5;
+  end Telemetry_Tx.impl;
+
+  ------------------------------------------------------------------
+  --  PROCESSO DA CONTROLADORA
+  ------------------------------------------------------------------
+
+  process CNC_Control
+  features
+    axis_x_cmd  : out data port CNC::Types::Axis_Command;
+    axis_y_cmd  : out data port CNC::Types::Axis_Command;
+    axis_z_cmd  : out data port CNC::Types::Axis_Command;
+    axis_x_pos  : in  data port CNC::Types::Axis_Position;
+    axis_y_pos  : in  data port CNC::Types::Axis_Position;
+    axis_z_pos  : in  data port CNC::Types::Axis_Position;
+    spindle_cmd : out data port CNC::Types::Spindle_Speed;
+    spindle_fb  : in  data port CNC::Types::Spindle_Speed;
+    spindle_alarm : out event port;
+    telemetry   : out data port CNC::Types::Telemetry_Record.impl;
+
+    --  Leituras dos sensores dos atuadores
+    axis_x_power  : in data port CNC::Types::Power_Reading;
+    axis_y_power  : in data port CNC::Types::Power_Reading;
+    axis_z_power  : in data port CNC::Types::Power_Reading;
+    spindle_power : in data port CNC::Types::Power_Reading;
+    spindle_temp  : in data port CNC::Types::Temperature_Reading;
+  flows
+    --  Eixo X como representante: Y e Z usam os mesmos componentes.
+    f_pos_x_in   : flow sink axis_x_pos;
+    f_power_x_in : flow sink axis_x_power;
+    f_temp_in    : flow sink spindle_temp;
+    f_telem_out  : flow source telemetry;
+  end CNC_Control;
+
+  process implementation CNC_Control.impl
+  subcomponents
+    motion  : thread Motion_Control.impl;
+    spindle : thread Spindle_Control.impl;
+    telem   : thread Telemetry_Tx.impl;
+
+    --  Recurso compartilhado entre as tres tarefas
+    machine_state : data CNC::Types::Machine_State.impl;
+
+  connections
+    c01 : port axis_x_pos -> motion.pos_x;
+    c02 : port axis_y_pos -> motion.pos_y;
+    c03 : port axis_z_pos -> motion.pos_z;
+    c04 : port motion.cmd_x -> axis_x_cmd;
+    c05 : port motion.cmd_y -> axis_y_cmd;
+    c06 : port motion.cmd_z -> axis_z_cmd;
+    c07 : port spindle_fb -> spindle.feedback;
+    c08 : port spindle.command -> spindle_cmd;
+    c09 : port telem.frame -> telemetry;
+
+    --  Sensores: a temperatura vai para o controle do spindle (CF5); as
+    --  potencias dos eixos vao para a malha de movimento (CF1b); todas
+    --  as leituras vao para a telemetria (CT3).
+    c10 : port axis_x_power -> telem.power_x;
+    c11 : port axis_y_power -> telem.power_y;
+    c12 : port axis_z_power -> telem.power_z;
+    c13 : port spindle_power -> telem.power_spindle;
+    c14 : port spindle_temp -> telem.temperature;
+    c15 : port spindle_temp -> spindle.temperature;
+    c16 : port axis_x_power -> motion.power_x;
+    c17 : port axis_y_power -> motion.power_y;
+    c18 : port axis_z_power -> motion.power_z;
+    c19 : port spindle.alarm -> spindle_alarm;
+
+    a01 : data access machine_state -> motion.state;
+    a02 : data access machine_state -> spindle.state;
+    a03 : data access machine_state -> telem.state;
+  flows
+    f_pos_x_in   : flow sink axis_x_pos -> c01 -> motion.f_pos_x_in;
+    f_power_x_in : flow sink axis_x_power -> c16 -> motion.f_power_x_in;
+    f_temp_in    : flow sink spindle_temp -> c15 -> spindle.f_temp_in;
+    f_telem_out  : flow source telem.f_tx -> c09 -> telemetry;
+  properties
+    --  Secoes criticas no Machine_State: ("dado", "thread", inicio, fim),
+    --  em tempo de execucao da propria thread, com unidade. Sem isto o
+    --  Cheddar assume a thread INTEIRA como secao critica e, com teto de
+    --  prioridade, a telemetria (8 ms) bloqueia a malha de movimento.
+    --    motion  : grava posicoes ao final do ciclo
+    --    spindle : grava rotacao ao final do ciclo
+    --    telem   : copia o estado no inicio, monta o pacote fora da secao
+    Cheddar_Properties::Critical_Section => (
+      "machine_state", "motion",  "200 us",  "200 us",
+      "machine_state", "spindle", "3000 us", "3000 us",
+      "machine_state", "telem",   "100 us",  "100 us");
+  end CNC_Control.impl;
+
+  ------------------------------------------------------------------
+  --  SOFTWARE DO GATEWAY ESP32
+  ------------------------------------------------------------------
+
+  --  Recebe o registro de telemetria da controladora. O envio para a
+  --  nuvem esta fora do escopo: esta thread e o ponto de extensao.
+  thread Telemetry_Rx
+  features
+    frame : in data port CNC::Types::Telemetry_Record.impl;
+  flows
+    f_rx : flow sink frame;
+  end Telemetry_Rx;
+
+  thread implementation Telemetry_Rx.impl
+  properties
+    Dispatch_Protocol      => Periodic;
+    Period                 => 100 ms;
+    Deadline               => 100 ms;
+    Compute_Execution_Time => 5 ms .. 10 ms;
+    Priority               => 10;
+  end Telemetry_Rx.impl;
+
+  process Gateway
+  features
+    telemetry_in : in data port CNC::Types::Telemetry_Record.impl;
+  flows
+    f_rx : flow sink telemetry_in;
+  end Gateway;
+
+  process implementation Gateway.impl
+  subcomponents
+    rx : thread Telemetry_Rx.impl;
+  connections
+    g01 : port telemetry_in -> rx.frame;
+  flows
+    f_rx : flow sink telemetry_in -> g01 -> rx.f_rx;
+  end Gateway.impl;
+
+end CNC::Software;

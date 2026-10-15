@@ -1,0 +1,6 @@
+<PROJECT>
+  <AADL path="types.aadl" enabled="true" opened="true"/>
+  <AADL path="hardware.aadl" enabled="true" opened="true"/>
+  <AADL path="software.aadl" enabled="true" opened="true"/>
+  <AADL path="cnc_system.aadl" enabled="true" opened="true"/>
+</PROJECT>

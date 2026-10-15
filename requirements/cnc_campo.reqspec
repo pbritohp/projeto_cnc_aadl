@@ -1,0 +1,90 @@
+// ------------------------------------------------------------------
+//  Requisitos CNC <-> atuadores/sensores (malha de campo)
+//
+//  Parte CRITICA do sistema: controle de movimento, controle do
+//  spindle e aquisicao dos sensores pelo fieldbus. Deriva dos
+//  requisitos R1-R5 do relatorio (secao 6). Valores preliminares.
+//
+//  A telemetria CNC -> ESP32 esta em cnc_telemetria.reqspec.
+// ------------------------------------------------------------------
+
+// Nivel de sistema: plataforma (processador e barramento de campo)
+system requirements CNC_Campo_Sistema : "Requisitos de campo - plataforma"
+	for CNC::Integration::CNC_Machine.impl
+[
+	description "Requisitos da malha critica entre o comando numerico e os atuadores/sensores."
+	see document Relatorio_AADL_CNC_Grupo8_1.docx
+
+	// CF1: parte critica do R1 do relatorio, dividida por tipo de sensor.
+	// Cada tipo tem uma dinamica fisica diferente, entao o limite tambem.
+
+	requirement CF1a : "Latencia posicao (encoder) -> CN" for e2e_pos_x [
+		val MaxLatency = 1 ms
+		compute pos_latency : AADL_Project::Time
+		description "A posicao medida pelo encoder deve chegar ao controle de movimento em no maximo " MaxLatency
+		value predicate pos_latency <= MaxLatency
+		rationale "Malha critica: a posicao precisa estar disponivel dentro de um ciclo da malha de controle (CF3: 1 ms). Eixo X como representante. Com o fieldbus sincronizado ao ciclo de 1 ms (EtherCAT Distributed Clocks): encoder 0,125 + fieldbus 0,25 + execucao 0,2 = ~0,6 ms."
+		issues "Depende da hipotese de sincronismo: sem ela, a espera de amostragem soma ate 1 ms e o total vai a ~1,6 ms. Na analise de latencia do OSATE, usar a opcao de sistema sincrono."
+	]
+
+	requirement CF1b : "Latencia potencia -> CN" for e2e_power_x [
+		val MaxLatency = 10 ms
+		compute power_latency : AADL_Project::Time
+		description "A leitura de potencia de um atuador deve chegar ao comando numerico em no maximo " MaxLatency
+		value predicate power_latency <= MaxLatency
+		rationale "Monitoramento de carga do motor: faixa tipica de 1 a 10 ms. Eixo X como representante. A potencia dos eixos e lida pela motion_control (1 ms): sensor 5 + fieldbus 0,25 + espera 1 + execucao 0,2 = ~6,5 ms."
+	]
+
+	requirement CF1c : "Latencia temperatura -> CN" for e2e_temp [
+		val MaxLatency = 500 ms
+		compute temp_latency : AADL_Project::Time
+		description "A temperatura do spindle deve chegar ao controle do spindle em no maximo " MaxLatency
+		value predicate temp_latency <= MaxLatency
+		rationale "A constante termica do spindle e de segundos: 500 ms basta para o alarme do CF5. Estimativa: sensor 100 + fieldbus 0,25 + espera 20 + resposta 3,8 = ~124 ms."
+	]
+
+	requirement CF2 : "Utilizacao do CPU_CN" for cpu [
+		val MaxUtilization = 70.0
+		compute cpu_utilization : real
+		description "A utilizacao do processador " this " deve ser no maximo " MaxUtilization " por cento."
+		value predicate cpu_utilization <= MaxUtilization
+		rationale "R3 do relatorio. Margem para crescimento do software e para o bloqueio no Machine_State. Modelo atual: U = 0,20 + 0,15 + 0,08 = 43 por cento (Cheddar, 08/10/2026)."
+	]
+
+	requirement CF4 : "Utilizacao do fieldbus" for fieldbus [
+		val MaxBusUtilization = 60.0
+		compute fieldbus_utilization : real
+		description "A ocupacao do barramento " this " deve ser no maximo " MaxBusUtilization " por cento da banda."
+		value predicate fieldbus_utilization <= MaxBusUtilization
+		rationale "R4 do relatorio. Folga para retransmissoes e para novos dispositivos no barramento. Data_Size nos tipos e SEI::BandWidthCapacity = 100 Mbps no fieldbus: 164 B por ciclo de 1 ms = 1,31 Mbit/s = 1,3 por cento."
+		issues "Tamanhos de mensagem e banda sao valores tipicos (EtherCAT 100 Mbit/s); confirmar com a documentacao da Technodrill."
+	]
+
+	// Telemetria (NAO critica): definida em cnc_telemetria.reqspec como
+	// global requirements e aplicada aqui, porque o ReqSpec so aceita um
+	// conjunto "system requirements" por componente.
+	include CNC_Telemetria_Sistema.CT1 for e2e_telemetry
+	include CNC_Telemetria_Sistema.CT2 for eth
+	include CNC_Telemetria_Sistema.CT3 for gw
+]
+
+// Nivel de software: threads da controladora
+system requirements CNC_Campo_Controle : "Requisitos de campo - threads de controle"
+	for CNC::Software::CNC_Control.impl
+[
+	description "Requisitos temporais e funcionais das threads que atuam sobre a maquina."
+
+	requirement CF3 : "Periodo da malha de controle dos eixos" for motion [
+		val MaxPeriod = 1 ms
+		description "A thread de controle dos eixos " this " deve ser periodica com periodo de no maximo " MaxPeriod " e deadline menor ou igual ao periodo."
+		value predicate #Timing_Properties::Period <= MaxPeriod and #Timing_Properties::Deadline <= #Timing_Properties::Period
+		rationale "R2 do relatorio. Modelo: Period = Deadline = 1 ms, WCET 0,1 a 0,2 ms; resposta de pior caso 0,2 ms (Cheddar). Os 8 ms informados pela Technodrill sao o ciclo CNC -> IHM, nao a malha de posicao."
+	]
+
+	requirement CF5 : "Alarme de temperatura do spindle" for spindle [
+		val TempLimit = 70.0
+		description "Se a temperatura do spindle ultrapassar " TempLimit " graus C, a thread " this " deve gerar alarme e reduzir a rotacao."
+		informal predicate "Temperatura acima do limite gera alarme e reducao do comando de rotacao."
+		rationale "R5 do relatorio. A temperatura chega a spindle_control (conexao c15), dentro do limite do CF1c. Comportamento no Behavior Annex de Spindle_Control.impl: acima de 70 graus C emite o evento alarm (saida spindle_alarm do processo) e reduz o comando a metade da rotacao."
+	]
+]

@@ -1,0 +1,211 @@
+--------------------------------------------------------------------
+--  CNC::Hardware
+--------------------------------------------------------------------
+
+package CNC::Hardware
+public
+with CNC::Types;
+with Cheddar_Properties;
+with SEI;
+
+  ------------------------------------------------------------------
+  --  BARRAMENTOS
+  ------------------------------------------------------------------
+
+  --  Barramento interno: liga a controladora aos drives.
+  --  Fieldbus tipo EtherCAT a 100 Mbit/s, ciclo de 1 ms SINCRONIZADO
+  --  com a malha de movimento (Distributed Clocks): a posicao e lida
+  --  no inicio de cada ciclo de controle, sem espera de amostragem.
+  --
+  --  Carga (requisito CF4), por ciclo de 1 ms:
+  --    payload: 3 cmd x 8 B + 3 pos x 8 B + 2 rotacao x 4 B
+  --             + 4 potencias x 4 B + 1 temperatura x 4 B = 76 B
+  --    quadro : preambulo/IFG 20 B + Ethernet 18 B + EtherCAT 2 B
+  --             + 4 datagramas x 12 B = 88 B
+  --    total  : 164 B/ms = 1,31 Mbit/s -> 1,3 % de 100 Mbit/s
+  bus Fieldbus
+  properties
+    Latency => 125 us .. 250 us;
+    SEI::BandWidthCapacity => 100.0 Mbps;
+  end Fieldbus;
+
+  --  Rede externa: unico caminho de saida de dados da maquina.
+  --  TCP/IP em rede local, sem garantia de tempo real.
+  bus Ethernet
+  properties
+    Latency => 100 us .. 2 ms;
+    SEI::BandWidthCapacity => 100.0 Mbps;
+  end Ethernet;
+
+  ------------------------------------------------------------------
+  --  PROCESSADORES
+  ------------------------------------------------------------------
+
+  --  Comando numerico da maquina. O projeto e avaliado apenas em
+  --  simulacao AADL (sem bancada).
+  processor CNC_Controller
+  features
+    FB  : requires bus access Fieldbus;
+    ETH : requires bus access Ethernet;
+  end CNC_Controller;
+
+  processor implementation CNC_Controller.impl
+  properties
+    --  Rate Monotonic preemptivo: tarefa de menor periodo tem maior
+    --  prioridade. E a hipotese da analise de escalonabilidade.
+    --  RMS e o nome do Rate Monotonic no AADL_Project do OSATE; a
+    --  ponte osate2cheddar traduz para RATE_MONOTONIC_PROTOCOL.
+    Scheduling_Protocol  => (RMS);
+    Cheddar_Properties::Preemptive_Scheduler => true;
+  end CNC_Controller.impl;
+
+  --  Gateway de rede. Recebe a telemetria da maquina.
+  --  A ponte para a nuvem esta FORA do escopo desta entrega.
+  processor ESP32
+  features
+    ETH : requires bus access Ethernet;
+  end ESP32;
+
+  processor implementation ESP32.impl
+  properties
+    Scheduling_Protocol  => (RMS);
+    Cheddar_Properties::Preemptive_Scheduler => true;
+  end ESP32.impl;
+
+  ------------------------------------------------------------------
+  --  MOTORES
+  ------------------------------------------------------------------
+
+  --  Servo drive de um eixo linear. Instanciado tres vezes (X, Y, Z).
+  --  Recebe o comando de posicao e devolve a posicao medida pelo
+  --  encoder acoplado ao motor.
+  device Axis_Drive
+  features
+    Command  : in  data port CNC::Types::Axis_Command;
+    Position : out data port CNC::Types::Axis_Position;
+    FB       : requires bus access Fieldbus;
+  flows
+    f_pos : flow source Position;
+  properties
+    --  Dados trocados a cada ciclo do fieldbus.
+    Period => 1 ms;
+    --  Leitura do encoder e amostragem da malha de posicao do drive.
+    Latency => 50 us .. 125 us applies to f_pos;
+  end Axis_Drive;
+
+  device implementation Axis_Drive.impl
+  end Axis_Drive.impl;
+
+  --  Eixo-arvore: motor que gira a ferramenta de corte.
+  device Spindle_Drive
+  features
+    Speed_Command  : in  data port CNC::Types::Spindle_Speed;
+    Speed_Feedback : out data port CNC::Types::Spindle_Speed;
+    FB             : requires bus access Fieldbus;
+  properties
+    Period => 1 ms;
+  end Spindle_Drive;
+
+  device implementation Spindle_Drive.impl
+  end Spindle_Drive.impl;
+
+  ------------------------------------------------------------------
+  --  SENSORES
+  ------------------------------------------------------------------
+
+  --  Mede a potencia consumida pelo motor. Presente em todos os
+  --  atuadores (X, Y, Z e spindle).
+  device Power_Sensor
+  features
+    Power : out data port CNC::Types::Power_Reading;
+    FB    : requires bus access Fieldbus;
+  flows
+    f_power : flow source Power;
+  properties
+    Period => 1 ms;
+    --  Conversao e filtragem da medida de potencia (monitoramento).
+    Latency => 1 ms .. 5 ms applies to f_power;
+  end Power_Sensor;
+
+  device implementation Power_Sensor.impl
+  end Power_Sensor.impl;
+
+  --  Mede a temperatura do eixo-arvore. Usado pela controladora para
+  --  alarme e reducao de rotacao (requisito R5).
+  device Temperature_Sensor
+  features
+    Temperature : out data port CNC::Types::Temperature_Reading;
+    FB          : requires bus access Fieldbus;
+  flows
+    f_temp : flow source Temperature;
+  properties
+    Period => 1 ms;
+    --  Conversao do sensor termico (ADC lento). A constante termica do
+    --  spindle e de segundos, entao nao precisa ser rapido.
+    Latency => 10 ms .. 100 ms applies to f_temp;
+  end Temperature_Sensor;
+
+  device implementation Temperature_Sensor.impl
+  end Temperature_Sensor.impl;
+
+  ------------------------------------------------------------------
+  --  ATUADORES (motor + sensores)
+  ------------------------------------------------------------------
+
+  --  Atuador de um eixo linear. Instanciado tres vezes (X, Y, Z).
+  system Axis_Actuator
+  features
+    Command  : in  data port CNC::Types::Axis_Command;
+    Position : out data port CNC::Types::Axis_Position;
+    Power    : out data port CNC::Types::Power_Reading;
+    FB       : requires bus access Fieldbus;
+  flows
+    f_pos   : flow source Position;
+    f_power : flow source Power;
+  end Axis_Actuator;
+
+  system implementation Axis_Actuator.impl
+  subcomponents
+    motor        : device Axis_Drive.impl;
+    power_sensor : device Power_Sensor.impl;
+  connections
+    x01 : port Command -> motor.Command;
+    x02 : port motor.Position -> Position;
+    x03 : port power_sensor.Power -> Power;
+    x04 : bus access FB -> motor.FB;
+    x05 : bus access FB -> power_sensor.FB;
+  flows
+    f_pos   : flow source motor.f_pos -> x02 -> Position;
+    f_power : flow source power_sensor.f_power -> x03 -> Power;
+  end Axis_Actuator.impl;
+
+  --  Atuador do eixo-arvore.
+  system Spindle_Actuator
+  features
+    Speed_Command  : in  data port CNC::Types::Spindle_Speed;
+    Speed_Feedback : out data port CNC::Types::Spindle_Speed;
+    Power          : out data port CNC::Types::Power_Reading;
+    Temperature    : out data port CNC::Types::Temperature_Reading;
+    FB             : requires bus access Fieldbus;
+  flows
+    f_temp : flow source Temperature;
+  end Spindle_Actuator;
+
+  system implementation Spindle_Actuator.impl
+  subcomponents
+    motor        : device Spindle_Drive.impl;
+    power_sensor : device Power_Sensor.impl;
+    temp_sensor  : device Temperature_Sensor.impl;
+  connections
+    s01 : port Speed_Command -> motor.Speed_Command;
+    s02 : port motor.Speed_Feedback -> Speed_Feedback;
+    s03 : port power_sensor.Power -> Power;
+    s04 : port temp_sensor.Temperature -> Temperature;
+    s05 : bus access FB -> motor.FB;
+    s06 : bus access FB -> power_sensor.FB;
+    s07 : bus access FB -> temp_sensor.FB;
+  flows
+    f_temp : flow source temp_sensor.f_temp -> s04 -> Temperature;
+  end Spindle_Actuator.impl;
+
+end CNC::Hardware;

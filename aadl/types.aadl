@@ -1,0 +1,79 @@
+package CNC::Types
+public
+with Data_Model;
+
+  --  Data_Size: tamanho de cada amostra no barramento (requisito CF4).
+  --  Data_Representation: tipo numerico, usado pelo Behavior Annex da
+  --  spindle_control para comparar a temperatura (requisito CF5).
+
+  --  Comando de posicao enviado ao servo drive de um eixo.
+  data Axis_Command
+  properties
+    Data_Model::Data_Representation => Float;
+    Data_Size => 8 Bytes;
+  end Axis_Command;
+
+  --  Posicao real do eixo, lida do encoder [mm].
+  data Axis_Position
+  properties
+    Data_Model::Data_Representation => Float;
+    Data_Size => 8 Bytes;
+  end Axis_Position;
+
+  --  Rotacao do eixo-arvore [RPM]. Serve como comando e como
+  --  realimentacao.
+  data Spindle_Speed
+  properties
+    Data_Model::Data_Representation => Integer;
+    Data_Size => 4 Bytes;
+  end Spindle_Speed;
+
+  --  Potencia consumida por um atuador [W], lida pelo sensor de
+  --  potencia. Todos os atuadores possuem um.
+  data Power_Reading
+  properties
+    Data_Model::Data_Representation => Float;
+    Data_Size => 4 Bytes;
+  end Power_Reading;
+
+  --  Temperatura do eixo-arvore [graus C], lida pelo sensor de
+  --  temperatura do spindle.
+  data Temperature_Reading
+  properties
+    Data_Model::Data_Representation => Float;
+    Data_Size => 4 Bytes;
+  end Temperature_Reading;
+
+  --  Estado consolidado da maquina (posicoes + rotacao).
+  --  E o recurso compartilhado entre as threads da controladora.
+  data Machine_State
+  end Machine_State;
+
+  data implementation Machine_State.impl
+  properties
+    --  Teto de prioridade: evita inversao de prioridade entre a
+    --  malha de movimento (1 ms) e a telemetria (100 ms), que
+    --  disputam este dado.
+    --  Priority_Ceiling e o nome no AADL_Project do OSATE; a ponte
+    --  osate2cheddar traduz para Priority_Ceiling_Protocol.
+    Concurrency_Control_Protocol => Priority_Ceiling;
+  end Machine_State.impl;
+
+  --  Registro enviado ao ESP32 pela rede Ethernet. Contem a potencia
+  --  dos 4 atuadores e a temperatura do spindle (requisito CT3).
+  data Telemetry_Record
+  end Telemetry_Record;
+
+  data implementation Telemetry_Record.impl
+  subcomponents
+    power_x       : data Power_Reading;
+    power_y       : data Power_Reading;
+    power_z       : data Power_Reading;
+    power_spindle : data Power_Reading;
+    temperature   : data Temperature_Reading;
+  properties
+    Data_Model::Data_Representation => Struct;
+    Data_Size => 20 Bytes;
+  end Telemetry_Record.impl;
+
+end CNC::Types;

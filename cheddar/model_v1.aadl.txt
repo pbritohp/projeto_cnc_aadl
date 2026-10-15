@@ -1,0 +1,453 @@
+
+  system CNC_Machine
+  end CNC_Machine;
+
+  system implementation CNC_Machine.impl
+  subcomponents
+
+    
+    cpu      : processor CNC_Controller.impl;
+    esp      : processor ESP32.impl;
+    fieldbus : bus       Fieldbus;
+    eth      : bus       Ethernet;
+
+
+
+
+
+    
+    ctrl     : process CNC_Control.impl;
+    gw       : process Gateway.impl;
+
+  connections
+
+
+
+
+
+    
+    n09 : data port ctrl.telemetry -> gw.telemetry_in;
+
+    p05 : bus access fieldbus -> cpu.FB;
+    p06 : bus access eth -> cpu.ETH;
+    p07 : bus access eth -> esp.ETH;
+
+  properties
+
+    
+    Actual_Processor_Binding => reference cpu applies to ctrl;
+    Actual_Processor_Binding => reference esp applies to gw;
+
+    
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+    
+    Actual_Connection_Binding => reference eth applies to n09;
+
+
+
+
+
+  end CNC_Machine.impl;
+
+  bus Fieldbus
+  end Fieldbus;
+
+  
+  
+  bus Ethernet
+  end Ethernet;
+
+  
+  
+  
+
+  
+  
+  processor CNC_Controller
+  features
+    FB  : requires bus access Fieldbus;
+    ETH : requires bus access Ethernet;
+  end CNC_Controller;
+
+  processor implementation CNC_Controller.impl
+  properties
+    
+    
+    
+    
+    Scheduling_Protocol  => (RATE_MONOTONIC_PROTOCOL);
+    Cheddar_Properties::Preemptive_Scheduler => true;
+  end CNC_Controller.impl;
+
+  
+  
+  processor ESP32
+  features
+    ETH : requires bus access Ethernet;
+  end ESP32;
+
+  processor implementation ESP32.impl
+  properties
+    Scheduling_Protocol  => (RATE_MONOTONIC_PROTOCOL);
+    Cheddar_Properties::Preemptive_Scheduler => true;
+  end ESP32.impl;
+
+  
+  
+  
+
+  
+  
+  
+  device Axis_Drive
+  features
+    Command  : in  data port Axis_Command;
+    Position : out data port Axis_Position;
+    FB       : requires bus access Fieldbus;
+  properties
+    
+    Period => 10 us;
+
+  end Axis_Drive;
+
+  device implementation Axis_Drive.impl
+  end Axis_Drive.impl;
+
+  
+  device Spindle_Drive
+  features
+    Speed_Command  : in  data port Spindle_Speed;
+    Speed_Feedback : out data port Spindle_Speed;
+    FB             : requires bus access Fieldbus;
+  properties
+    Period => 10 us;
+  end Spindle_Drive;
+
+  device implementation Spindle_Drive.impl
+  end Spindle_Drive.impl;
+
+  
+  
+  
+
+  
+  
+  device Power_Sensor
+  features
+    Power : out data port Power_Reading;
+    FB    : requires bus access Fieldbus;
+  properties
+    Period => 10 us;
+
+  end Power_Sensor;
+
+  device implementation Power_Sensor.impl
+  end Power_Sensor.impl;
+
+  
+  
+  device Temperature_Sensor
+  features
+    Temperature : out data port Temperature_Reading;
+    FB          : requires bus access Fieldbus;
+  properties
+    Period => 10 us;
+
+  end Temperature_Sensor;
+
+  device implementation Temperature_Sensor.impl
+  end Temperature_Sensor.impl;
+
+  
+  
+  
+
+  
+  system Axis_Actuator
+  features
+    Command  : in  data port Axis_Command;
+    Position : out data port Axis_Position;
+    Power    : out data port Power_Reading;
+    FB       : requires bus access Fieldbus;
+  end Axis_Actuator;
+
+  system implementation Axis_Actuator.impl
+  subcomponents
+    motor        : device Axis_Drive.impl;
+    power_sensor : device Power_Sensor.impl;
+  connections
+    x01 : data port Command -> motor.Command;
+    x02 : data port motor.Position -> Position;
+    x03 : data port power_sensor.Power -> Power;
+    x04 : bus access FB -> motor.FB;
+    x05 : bus access FB -> power_sensor.FB;
+  end Axis_Actuator.impl;
+
+  
+  system Spindle_Actuator
+  features
+    Speed_Command  : in  data port Spindle_Speed;
+    Speed_Feedback : out data port Spindle_Speed;
+    Power          : out data port Power_Reading;
+    Temperature    : out data port Temperature_Reading;
+    FB             : requires bus access Fieldbus;
+  end Spindle_Actuator;
+
+  system implementation Spindle_Actuator.impl
+  subcomponents
+    motor        : device Spindle_Drive.impl;
+    power_sensor : device Power_Sensor.impl;
+    temp_sensor  : device Temperature_Sensor.impl;
+  connections
+    s01 : data port Speed_Command -> motor.Speed_Command;
+    s02 : data port motor.Speed_Feedback -> Speed_Feedback;
+    s03 : data port power_sensor.Power -> Power;
+    s04 : data port temp_sensor.Temperature -> Temperature;
+    s05 : bus access FB -> motor.FB;
+    s06 : bus access FB -> power_sensor.FB;
+    s07 : bus access FB -> temp_sensor.FB;
+  end Spindle_Actuator.impl;
+
+  thread Motion_Control
+  features
+    pos_x   : in  data port Axis_Position;
+    pos_y   : in  data port Axis_Position;
+    pos_z   : in  data port Axis_Position;
+    power_x : in  data port Power_Reading;
+    power_y : in  data port Power_Reading;
+    power_z : in  data port Power_Reading;
+    cmd_x   : out data port Axis_Command;
+    cmd_y   : out data port Axis_Command;
+    cmd_z   : out data port Axis_Command;
+    state   : requires data access Machine_State.impl;
+  end Motion_Control;
+
+  thread implementation Motion_Control.impl
+  properties
+    Dispatch_Protocol      => Periodic;
+    Period                 => 10 us;
+    Deadline               => 10 us;
+    Compute_Execution_Time => 1 us .. 2 us;
+    Cheddar_Properties::Fixed_Priority => 20;
+  end Motion_Control.impl;
+
+  
+  
+  
+  thread Spindle_Control
+  features
+    feedback    : in  data port Spindle_Speed;
+    temperature : in  data port Temperature_Reading;
+    command     : out data port Spindle_Speed;
+    alarm       : out event port;
+    state       : requires data access Machine_State.impl;
+  end Spindle_Control;
+
+  thread implementation Spindle_Control.impl
+  properties
+    Dispatch_Protocol      => Periodic;
+    Period                 => 200 us;
+    Deadline               => 200 us;
+    Compute_Execution_Time => 20 us .. 30 us;
+    Cheddar_Properties::Fixed_Priority => 15;
+  
+  end Spindle_Control.impl;
+
+  
+  
+  
+  
+  thread Telemetry_Tx
+  features
+    power_x       : in  data port Power_Reading;
+    power_y       : in  data port Power_Reading;
+    power_z       : in  data port Power_Reading;
+    power_spindle : in  data port Power_Reading;
+    temperature   : in  data port Temperature_Reading;
+    frame         : out data port Telemetry_Record.impl;
+    state         : requires data access Machine_State.impl;
+  end Telemetry_Tx;
+
+  thread implementation Telemetry_Tx.impl
+  properties
+    Dispatch_Protocol      => Periodic;
+    Period                 => 1000 us;
+    Deadline               => 1000 us;
+    Compute_Execution_Time => 50 us .. 80 us;
+    Cheddar_Properties::Fixed_Priority => 5;
+  end Telemetry_Tx.impl;
+
+  
+  
+  
+
+  process CNC_Control
+  features
+    axis_x_cmd  : out data port Axis_Command;
+    axis_y_cmd  : out data port Axis_Command;
+    axis_z_cmd  : out data port Axis_Command;
+    axis_x_pos  : in  data port Axis_Position;
+    axis_y_pos  : in  data port Axis_Position;
+    axis_z_pos  : in  data port Axis_Position;
+    spindle_cmd : out data port Spindle_Speed;
+    spindle_fb  : in  data port Spindle_Speed;
+    spindle_alarm : out event port;
+    telemetry   : out data port Telemetry_Record.impl;
+
+    
+    axis_x_power  : in data port Power_Reading;
+    axis_y_power  : in data port Power_Reading;
+    axis_z_power  : in data port Power_Reading;
+    spindle_power : in data port Power_Reading;
+    spindle_temp  : in data port Temperature_Reading;
+  end CNC_Control;
+
+  process implementation CNC_Control.impl
+  subcomponents
+    motion  : thread Motion_Control.impl;
+    spindle : thread Spindle_Control.impl;
+    telem   : thread Telemetry_Tx.impl;
+
+    
+    machine_state : data Machine_State.impl;
+
+  connections
+    c01 : data port axis_x_pos -> motion.pos_x;
+    c02 : data port axis_y_pos -> motion.pos_y;
+    c03 : data port axis_z_pos -> motion.pos_z;
+    c04 : data port motion.cmd_x -> axis_x_cmd;
+    c05 : data port motion.cmd_y -> axis_y_cmd;
+    c06 : data port motion.cmd_z -> axis_z_cmd;
+    c07 : data port spindle_fb -> spindle.feedback;
+    c08 : data port spindle.command -> spindle_cmd;
+    c09 : data port telem.frame -> telemetry;
+
+    
+    
+    
+    c10 : data port axis_x_power -> telem.power_x;
+    c11 : data port axis_y_power -> telem.power_y;
+    c12 : data port axis_z_power -> telem.power_z;
+    c13 : data port spindle_power -> telem.power_spindle;
+    c14 : data port spindle_temp -> telem.temperature;
+    c15 : data port spindle_temp -> spindle.temperature;
+    c16 : data port axis_x_power -> motion.power_x;
+    c17 : data port axis_y_power -> motion.power_y;
+    c18 : data port axis_z_power -> motion.power_z;
+    c19 : event port spindle.alarm -> spindle_alarm;
+
+    a01 : data access machine_state -> motion.state;
+    a02 : data access machine_state -> spindle.state;
+    a03 : data access machine_state -> telem.state;
+  properties
+    
+    
+    
+    
+    
+    
+    
+    Cheddar_Properties::Critical_Section => (
+      "machine_state", "motion",  "2",  "2",
+      "machine_state", "spindle", "30", "30",
+      "machine_state", "telem",   "1",  "1");
+  end CNC_Control.impl;
+
+  
+  
+  
+
+  
+  
+  thread Telemetry_Rx
+  features
+    frame : in data port Telemetry_Record.impl;
+  end Telemetry_Rx;
+
+  thread implementation Telemetry_Rx.impl
+  properties
+    Dispatch_Protocol      => Periodic;
+    Period                 => 1000 us;
+    Deadline               => 1000 us;
+    Compute_Execution_Time => 50 us .. 100 us;
+    Cheddar_Properties::Fixed_Priority => 10;
+  end Telemetry_Rx.impl;
+
+  process Gateway
+  features
+    telemetry_in : in data port Telemetry_Record.impl;
+  end Gateway;
+
+  process implementation Gateway.impl
+  subcomponents
+    rx : thread Telemetry_Rx.impl;
+  connections
+    g01 : data port telemetry_in -> rx.frame;
+  end Gateway.impl;
+
+  data Axis_Command
+  end Axis_Command;
+
+  
+  data Axis_Position
+  end Axis_Position;
+
+  
+  
+  data Spindle_Speed
+  end Spindle_Speed;
+
+  
+  
+  data Power_Reading
+  end Power_Reading;
+
+  
+  
+  data Temperature_Reading
+  end Temperature_Reading;
+
+  
+  
+  data Machine_State
+  end Machine_State;
+
+  data implementation Machine_State.impl
+  properties
+    
+    
+    
+    
+    
+    Concurrency_Control_Protocol => Priority_Ceiling_Protocol;
+  end Machine_State.impl;
+
+  
+  
+  data Telemetry_Record
+  end Telemetry_Record;
+
+  data implementation Telemetry_Record.impl
+  subcomponents
+    power_x       : data Power_Reading;
+    power_y       : data Power_Reading;
+    power_z       : data Power_Reading;
+    power_spindle : data Power_Reading;
+    temperature   : data Temperature_Reading;
+  end Telemetry_Record.impl;
+
+
